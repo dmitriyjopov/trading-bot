@@ -1,16 +1,29 @@
-# This is a sample Python script.
+from pybit.unified_trading import WebSocket
+import csv
+from time import sleep
 
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
+SYMBOL = "BTCUSDT"
 
+ws = WebSocket(
+    testnet=False,
+    channel_type="linear",
+)
+def handle_message(msg):
+        topic = msg.get("topic", "")
+        data = list()
+        if topic == f"publicTrade.{SYMBOL}":
+            for i in range(8):
+                data[i] = msg.get("data", ""[i])
+            with open('data.csv', 'w', newline='') as csvfile:
+                parse = csv.writer(csvfile, delimiter=' ',
+                                        quotechar='|', quoting=csv.QUOTE_MINIMAL)
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
+                parse.writerow([data[i]] * 5 + ['Baked Beans'])
+                parse.writerow(['Spam', 'Lovely Spam', 'Wonderful Spam'])
 
-
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
-    print_hi('PyCharm')
-
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+ws.trade_stream(
+    symbol="BTCUSDT",
+    callback=handle_message
+)
+while True:
+    sleep(1)
