@@ -1,12 +1,17 @@
 from pybit.unified_trading import WebSocket
-import csv
-import os
-import time
+import csv, os, time, logging, threading, sys
 from datetime import datetime, timezone
 
+os.system("")# иногда помогает
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 SYMBOL = "BTCUSDT"
-TICKS_FILE = os.path.expanduser("G:/alldata/data.csv")
-OB_FILE = os.path.expanduser("G:/alldata/orderbook.csv")
+TICKS_FILE = os.path.expanduser("C:/Users/382he/PycharmProjects/dataparcer/data.csv")
+OB_FILE = os.path.expanduser("C:/Users/382he/PycharmProjects/dataparcer/orderbook.csv")
+MSG_TIMEOUT =  30
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 def init_csv(filename, header):
     if not os.path.exists(filename) or os.path.getsize(filename) == 0:
@@ -26,12 +31,16 @@ init_csv(OB_FILE, ["recv_time", "symbol", "type", "seq", "u", "side", "price", "
 DEPTH = 50
 TOPIC_OB = f"orderbook.{DEPTH}.{SYMBOL}"
 
+backoff = 1
+last_msg_time = time.time()
+
+# парсинг
 def handle_message(msg):
     # используем timezone-aware, но убираем tzinfo, чтобы формат совпадал с utc.isoformat()
     recv_dt = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     topic = msg.get("topic", "")
     if topic == f"publicTrade.{SYMBOL}":
-        with open(TICKS_FILE, 'a', newline='') as csvfile:
+        with open(TICKS_FILE, 'a', newline='', encoding='utf-8') as csvfile:
             writer = csv.writer(csvfile)
             for trade in msg.get("data", []):
                 try:
@@ -84,13 +93,45 @@ def handle_message(msg):
             else:
                 print("Unknown orderbook msg type:", msg_type)
 
-ws = WebSocket(testnet=False, channel_type="linear")
-ws.trade_stream(symbol=SYMBOL, callback=handle_message)
-ws.orderbook_stream(symbol=SYMBOL, depth=DEPTH, callback=handle_message)
-
 while True:
     try:
-        time.sleep(1)
+        last_msg_time = time.time()
+        ws = WebSocket(testnet=False, channel_type="linear")
+        ws.trade_stream(symbol=SYMBOL, callback=handle_message)
+        ws.orderbook_stream(symbol=SYMBOL, depth=DEPTH, callback=handle_message)
+
+        stop_event = threading.Event()
+        def monitor():
+            logging.info("Монитор запущен")
+            while not stop_event.is_set():
+                if time.time() - last_msg_time > MSG_TIMEOUT:
+                    logging.warning("Нет сообщений %s сек — закрываем", MSG_TIMEOUT)
+                    ws.exit()
+                    stop_event.set()
+                    break
+                time.sleep(1)
+            logging.info("Монитор завершён")
+
+        monitor_thread = threading.Thread(target=monitor, daemon=True)
+        monitor_thread.start()
+
+        logging.info("Главный поток — вход в wait-loop")
+        while not stop_event.is_set():
+            time.sleep(1)
+        logging.info("Главный поток — выход из wait-loop")
+
+        monitor_thread.join(timeout=2)
+        backoff = 1
+
     except KeyboardInterrupt:
-        print("Stopping...")
+        logging.info("ручное завершение программы")
+        ws.exit()
         break
+
+    except Exception:
+        logging.exception("Ошибка — reconnect через %s сек", backoff)
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 60)
+        continue
+    
+    
