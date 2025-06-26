@@ -1,81 +1,97 @@
 from pybit.unified_trading import WebSocket
 import csv, os, time, logging, threading, sys
 from datetime import datetime, timezone
+from io import StringIO
+from collections import deque
 
 os.system("")# иногда помогает
-# type: ignore
+# Убираем проблемные строки с reconfigure
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
 
 SYMBOL = "BTCUSDT"
-TICKS_FILE = os.path.expanduser("C:/Users/382he/PycharmProjects/dataparcer/data.csv")
-OB_FILE = os.path.expanduser("C:/Users/382he/PycharmProjects/dataparcer/orderbook.csv")
+TICKS_FILE = os.path.expanduser("data.csv")
+OB_FILE = os.path.expanduser("orderbook.csv")
 MSG_TIMEOUT =  30
 
-# Буферизация для CSV
-TICKS_BUFFER_SIZE = 1000
-OB_BUFFER_SIZE = 1000
-ticks_buffer = []
-ob_buffer = []
-buffer_lock = threading.Lock()
+# Настройки буферизации
+BUFFER_SIZE = 1000  # Количество записей в буфере перед записью
+FLUSH_INTERVAL = 5  # Секунды между принудительной записью
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-def flush_ticks_buffer():
-    """Записывает буфер тиков в файл"""
-    global ticks_buffer
-    with buffer_lock:
-        if ticks_buffer:
-            with open(TICKS_FILE, 'a', newline='', encoding='utf-8') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerows(ticks_buffer)
-            ticks_buffer = []
+# Класс для буферизованной записи в CSV
+class BufferedCSVWriter:
+    def __init__(self, filename, header, buffer_size=BUFFER_SIZE, flush_interval=FLUSH_INTERVAL):
+        self.filename = filename
+        self.header = header
+        self.buffer_size = buffer_size
+        self.flush_interval = flush_interval
+        self.buffer = deque()
+        self.last_flush_time = time.time()
+        self.lock = threading.Lock()
+        
+        # Инициализация файла
+        self._init_file()
+        
+        # Запуск фонового потока для периодической записи
+        self.stop_event = threading.Event()
+        self.flush_thread = threading.Thread(target=self._periodic_flush, daemon=True)
+        self.flush_thread.start()
+    
+    def _init_file(self):
+        if not os.path.exists(self.filename) or os.path.getsize(self.filename) == 0:
+            dirpath = os.path.dirname(self.filename)
+            if dirpath and not os.path.exists(dirpath):
+                os.makedirs(dirpath, exist_ok=True)
+            with open(self.filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(self.header)
+            print(f"CSV инициализирован: записан заголовок в {self.filename}")
+        else:
+            print(f"CSV существует и не пустой: {self.filename}, пропускаем инициализацию.")
+    
+    def write_row(self, row):
+        with self.lock:
+            self.buffer.append(row)
+            if len(self.buffer) >= self.buffer_size:
+                self._flush_buffer()
+    
+    def _flush_buffer(self):
+        if not self.buffer:
+            return
+            
+        with open(self.filename, 'a', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            while self.buffer:
+                writer.writerow(self.buffer.popleft())
+        
+        self.last_flush_time = time.time()
+        logging.debug(f"Записано {self.buffer_size} записей в {self.filename}")
+    
+    def _periodic_flush(self):
+        while not self.stop_event.is_set():
+            time.sleep(1)
+            if time.time() - self.last_flush_time > self.flush_interval:
+                with self.lock:
+                    if self.buffer:
+                        self._flush_buffer()
+    
+    def flush(self):
+        """Принудительная запись всех данных из буфера"""
+        with self.lock:
+            self._flush_buffer()
+    
+    def close(self):
+        """Закрытие writer с записью оставшихся данных"""
+        self.stop_event.set()
+        self.flush()
+        if self.flush_thread.is_alive():
+            self.flush_thread.join(timeout=2)
 
-def flush_ob_buffer():
-    """Записывает буфер orderbook в файл"""
-    global ob_buffer
-    with buffer_lock:
-        if ob_buffer:
-            with open(OB_FILE, 'a', newline='') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerows(ob_buffer)
-            ob_buffer = []
-
-def flush_all_buffers():
-    """Записывает все буферы"""
-    flush_ticks_buffer()
-    flush_ob_buffer()
-
-def add_to_ticks_buffer(row):
-    """Добавляет строку в буфер тиков"""
-    global ticks_buffer
-    with buffer_lock:
-        ticks_buffer.append(row)
-        if len(ticks_buffer) >= TICKS_BUFFER_SIZE:
-            flush_ticks_buffer()
-
-def add_to_ob_buffer(row):
-    """Добавляет строку в буфер orderbook"""
-    global ob_buffer
-    with buffer_lock:
-        ob_buffer.append(row)
-        if len(ob_buffer) >= OB_BUFFER_SIZE:
-            flush_ob_buffer()
-
-def init_csv(filename, header):
-    if not os.path.exists(filename) or os.path.getsize(filename) == 0:
-        dirpath = os.path.dirname(filename)
-        if dirpath and not os.path.exists(dirpath):
-            os.makedirs(dirpath, exist_ok=True)
-        with open(filename, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(header)
-        print(f"CSV инициализирован: записан заголовок в {filename}")
-    else:
-        print(f"CSV существует и не пустой: {filename}, пропускаем инициализацию.")
-
-init_csv(TICKS_FILE, ["recv_time", "timestamp", "symbol", "price", "size", "side"])
-init_csv(OB_FILE, ["recv_time", "symbol", "type", "seq", "u", "side", "price", "size", "ts"])
+# Создаем буферизованные writers
+ticks_writer = BufferedCSVWriter(TICKS_FILE, ["recv_time", "timestamp", "symbol", "price", "size", "side"])
+ob_writer = BufferedCSVWriter(OB_FILE, ["recv_time", "symbol", "type", "seq", "u", "side", "price", "size", "ts"])
 
 DEPTH = 50
 TOPIC_OB = f"orderbook.{DEPTH}.{SYMBOL}"
@@ -100,7 +116,7 @@ def handle_message(msg):
                 continue
             # UTC from timestamp, same format
             dt = datetime.fromtimestamp(ts/1000, timezone.utc).replace(tzinfo=None).isoformat()
-            add_to_ticks_buffer([recv_dt, dt, SYMBOL, price, size, side])
+            ticks_writer.write_row([recv_dt, dt, SYMBOL, price, size, side])
     elif topic == TOPIC_OB:
         msg_type = msg.get("type", "")
         data = msg.get("data", {}) or {}
@@ -116,26 +132,26 @@ def handle_message(msg):
                     price = float(bid[0]); size = float(bid[1])
                 except:
                     continue
-                add_to_ob_buffer([recv_dt, SYMBOL, "snapshot", seq, u, "Buy", price, size, ts_server])
+                ob_writer.write_row([recv_dt, SYMBOL, "snapshot", seq, u, "Buy", price, size, ts_server])
             for ask in asks:
                 try:
                     price = float(ask[0]); size = float(ask[1])
                 except:
                     continue
-                add_to_ob_buffer([recv_dt, SYMBOL, "snapshot", seq, u, "Sell", price, size, ts_server])
+                ob_writer.write_row([recv_dt, SYMBOL, "snapshot", seq, u, "Sell", price, size, ts_server])
         elif msg_type == "delta":
             for bid in bids:
                 try:
                     price = float(bid[0]); size = float(bid[1])
                 except:
                     continue
-                add_to_ob_buffer([recv_dt, SYMBOL, "delta", seq, u, "Buy", price, size, ts_server])
+                ob_writer.write_row([recv_dt, SYMBOL, "delta", seq, u, "Buy", price, size, ts_server])
             for ask in asks:
                 try:
                     price = float(ask[0]); size = float(ask[1])
                 except:
                     continue
-                add_to_ob_buffer([recv_dt, SYMBOL, "delta", seq, u, "Sell", price, size, ts_server])
+                ob_writer.write_row([recv_dt, SYMBOL, "delta", seq, u, "Sell", price, size, ts_server])
         else:
             print("Unknown orderbook msg type:", msg_type)
 
@@ -158,20 +174,8 @@ while True:
                 time.sleep(1)
             logging.info("Монитор завершён")
 
-        def buffer_flusher():
-            """Периодически записывает буферы в файлы"""
-            logging.info("Буферизатор запущен")
-            while not stop_event.is_set():
-                time.sleep(5)  # Записываем каждые 5 секунд
-                flush_all_buffers()
-            # Финальная запись при завершении
-            flush_all_buffers()
-            logging.info("Буферизатор завершён")
-
         monitor_thread = threading.Thread(target=monitor, daemon=True)
-        buffer_thread = threading.Thread(target=buffer_flusher, daemon=True)
         monitor_thread.start()
-        buffer_thread.start()
 
         logging.info("Главный поток — вход в wait-loop")
         while not stop_event.is_set():
@@ -179,18 +183,21 @@ while True:
         logging.info("Главный поток — выход из wait-loop")
 
         monitor_thread.join(timeout=2)
-        buffer_thread.join(timeout=2)
         backoff = 1
 
     except KeyboardInterrupt:
         logging.info("ручное завершение программы")
-        flush_all_buffers()  # Сохраняем оставшиеся данные
         ws.exit()
+        # Записываем оставшиеся данные перед выходом
+        ticks_writer.close()
+        ob_writer.close()
         break
 
     except Exception:
         logging.exception("Ошибка — reconnect через %s сек", backoff)
-        flush_all_buffers()  # Сохраняем данные перед переподключением
+        # Записываем данные перед переподключением
+        ticks_writer.flush()
+        ob_writer.flush()
         time.sleep(backoff)
         backoff = min(backoff * 2, 60)
         continue
