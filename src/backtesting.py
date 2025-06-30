@@ -1,12 +1,13 @@
 from collections import deque, defaultdict
 from datetime import datetime, timezone
+from shlex import join
 import pandas as pd
-
-# FILE_NAME = "data.csv"
-# STEP = 0.5#шаг цены
-# PERIOD = "1h"#частота группировки
-
-# df = pd.read_csv(FILE_NAME, parse_dates=['recv_time'], delimiter=',')
+import math
+'''
+BUCKET_SIZE, WINDOW_LENGTH - ДЛЯ VPIN
+'''
+BUCKET_SIZE = 1000
+WINDOW_LENGTH = 10
 
 #VAH, VAL, POC
 def value_area(df, period, step):
@@ -73,9 +74,23 @@ def volume_delta(df, period):
     
     delta = vol_df.get('Buy') - vol_df.get('Sell')
 
-    return delta.iloc[0]
-    
+    return delta
 
+#Volume‑Synchronised Probability of Informed Trading    
+def VPIN(df, bucket_size, window_length):
+    df['signed_size'] = df['size'] * df['side'].map({'Buy':1, 'Sell':-1})
+
+    df['cum_vol']   = df['size'].abs().cumsum()
+    df['bucket_id'] = (df['cum_vol'] // bucket_size).astype(int)
+
+    agg = df.groupby('bucket_id')['signed_size'].agg(
+        buy_vol  = lambda x: x[x>0].sum(),
+        sell_vol = lambda x: -x[x<0].sum()
+    )
+    imbalance = (agg['buy_vol'] - agg['sell_vol']).abs() / bucket_size
+
+    vpin = imbalance.rolling(window=window_length, min_periods=1).mean()
+    return vpin
 
 def main():
     FILE_NAME = str(input("введите путь к файлу, нажмите [d] для дефолтного пути (data.csv)\n"))
@@ -106,10 +121,34 @@ def main():
     # Для вывода последней записи
     last_record = va_df.iloc[-1]
     print("\nПоследний период:")
+
     print(f"POC: {last_record['POC_price']} (объем: {last_record['POC_volume']})")
+
     print(f"VAH: {last_record['VAH']}, VAL: {last_record['VAL']}")
-    print(f"Дельта объема: {volume_delta(df.copy(), PERIOD)}")
-    
+
+    print("Дельта объёма по часам:")
+    delta = volume_delta(df, PERIOD).rename("volume_delta")
+    df_out = delta.reset_index()
+    df_out.columns = ["Time", "volume_delta"]
+    print(df_out.to_string(index=False), "\n")
+
+    #форматирование вывода VPIN
+    df2 = df.copy()
+    vpin = VPIN(df2, BUCKET_SIZE, WINDOW_LENGTH)
+    df2['cum_vol']   = df2['size'].abs().cumsum()
+    df2['bucket_id'] = (df2['cum_vol'] // BUCKET_SIZE).astype(int)
+    times = df2.groupby('bucket_id')['recv_time'].max()
+
+    vpin = vpin.to_frame('VPIN').join(times)
+    vpin.index = vpin['recv_time']
+    vpin_hourly = vpin['VPIN'].resample(PERIOD).mean()
+
+    df_out = vpin_hourly.reset_index()
+    df_out.columns = ['recv_time', 'VPIN']
+    print("VPIN:")
+    print(df_out.to_string(index=False), "\n")
+
+
     #ФОРМАТИРОВАНИЯ ВЫВОДА КОНЕЦ
 
 if __name__ == "__main__":
