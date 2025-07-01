@@ -76,6 +76,13 @@ def volume_delta(df, period):
 
     return delta
 
+def RF(period):
+    VAH =  value_area(df.copy(), period)['VAH']
+    VAL =  value_area(df.copy(), period)['VAL']
+    POC_PRICE =  value_area(df.copy(), period)['POC']
+    RF = (VAH - POC_PRICE) / (POC_PRICE - VAL)
+    return RF
+
 #Volume‑Synchronised Probability of Informed Trading    
 def VPIN(df, bucket_size, window_length):
     df['signed_size'] = df['size'] * df['side'].map({'Buy':1, 'Sell':-1})
