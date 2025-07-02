@@ -76,12 +76,10 @@ def volume_delta(df, period):
 
     return delta
 
-def RF(period):
-    VAH =  value_area(df.copy(), period)['VAH']
-    VAL =  value_area(df.copy(), period)['VAL']
-    POC_PRICE =  value_area(df.copy(), period)['POC']
-    RF = (VAH - POC_PRICE) / (POC_PRICE - VAL)
-    return RF
+def RF(va_df):
+    rf = (va_df['VAH'] - va_df['POC_price']) / (va_df['POC_price'] - va_df['VAL'])
+    return rf.rename('RF')
+
 
 #Volume‑Synchronised Probability of Informed Trading    
 def VPIN(df, bucket_size, window_length):
@@ -99,6 +97,10 @@ def VPIN(df, bucket_size, window_length):
     vpin = imbalance.rolling(window=window_length, min_periods=1).mean()
     return vpin
 
+def result_output(va_df, delta, vpin, rf):
+    return pd.concat([va_df, delta, vpin, rf], axis=1)
+
+
 def main():
     FILE_NAME = str(input("введите путь к файлу, нажмите [d] для дефолтного пути (data.csv)\n"))
     if FILE_NAME == "d":
@@ -115,48 +117,25 @@ def main():
     df = pd.read_csv(FILE_NAME, parse_dates=['recv_time'], delimiter=',')
 
     #ФОРМАТИРОВАНИЯ ВЫВОДА НАЧАЛО
-    va_df = value_area(df.copy(), PERIOD, STEP)
-    va_df = va_df.astype({
-        'POC_price': float,
-        'POC_volume': float,
-        'VAH': float,
-        'VAL': float
+    va_df   = value_area(df, PERIOD, STEP)
+    delta   = volume_delta(df, PERIOD)
+    vpin    = VPIN(df.copy(), BUCKET_SIZE, WINDOW_LENGTH) \
+                .to_frame('VPIN')
+    rf = RF(va_df)
+
+    va_df = value_area(df, PERIOD, STEP).astype({
+    'POC_price':  float,
+    'POC_volume': float,
+    'VAH':        float,
+    'VAL':        float
     })
-    print("Результаты анализа:")
-    print(va_df)
-    
-    # Для вывода последней записи
-    last_record = va_df.iloc[-1]
-    print("\nПоследний период:")
 
-    print(f"POC: {last_record['POC_price']} (объем: {last_record['POC_volume']})")
+    delta = volume_delta(df, PERIOD).rename('volume_delta')
+    delta.index.name = 'recv_time'
 
-    print(f"VAH: {last_record['VAH']}, VAL: {last_record['VAL']}")
+    results = result_output(va_df, delta, vpin, rf)
+    print(results)
 
-    print("Дельта объёма по часам:")
-    delta = volume_delta(df, PERIOD).rename("volume_delta")
-    df_out = delta.reset_index()
-    df_out.columns = ["Time", "volume_delta"]
-    print(df_out.to_string(index=False), "\n")
-
-    #форматирование вывода VPIN
-    df2 = df.copy()
-    vpin = VPIN(df2, BUCKET_SIZE, WINDOW_LENGTH)
-    df2['cum_vol']   = df2['size'].abs().cumsum()
-    df2['bucket_id'] = (df2['cum_vol'] // BUCKET_SIZE).astype(int)
-    times = df2.groupby('bucket_id')['recv_time'].max()
-
-    vpin = vpin.to_frame('VPIN').join(times)
-    vpin.index = vpin['recv_time']
-    vpin_hourly = vpin['VPIN'].resample(PERIOD).mean()
-
-    df_out = vpin_hourly.reset_index()
-    df_out.columns = ['recv_time', 'VPIN']
-    print("VPIN:")
-    print(df_out.to_string(index=False), "\n")
-
-
-    #ФОРМАТИРОВАНИЯ ВЫВОДА КОНЕЦ
 
 if __name__ == "__main__":
     main()
