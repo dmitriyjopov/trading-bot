@@ -1,13 +1,11 @@
 import csv, os, time, logging, threading, signal, atexit
 from datetime import datetime, timezone
 from collections import deque
-import pyarrow as pa
-import pyarrow.parquet as pq
-import pandas as pd
+
 # Настройки
 SYMBOL        = "BTCUSDT"
-TICKS_FILE    = os.path.expanduser("data.parquet")
-OB_FILE       = os.path.expanduser("orderbook.parquet")
+TICKS_FILE    = os.path.expanduser("data.csv")
+OB_FILE       = os.path.expanduser("orderbook.csv")
 MSG_TIMEOUT   = 30           # сек
 BUFFER_SIZE   = 100
 FLUSH_INTERVAL= 2            # сек
@@ -15,8 +13,8 @@ DEPTH         = 50
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# --- Буферизованный Parquet writer ---
-class BufferedParquetWriter:
+# --- Буферизованный CSV writer ---
+class BufferedCSVWriter:
     def __init__(self, filename, header):
         self.filename = filename
         self.header   = header
@@ -30,11 +28,9 @@ class BufferedParquetWriter:
 
     def _init_file(self):
         os.makedirs(os.path.dirname(self.filename) or ".", exist_ok=True)
-        # Если файл не существует, создаём новый пустой DataFrame и сохраняем его как Parquet
-        if not os.path.exists(self.filename) or os.path.getsize(self.filename) == 0:
-            df = pd.DataFrame(columns=self.header)
-            table = pa.Table.from_pandas(df)
-            pq.write_table(table, self.filename)
+        if not os.path.exists(self.filename) or os.path.getsize(self.filename)==0:
+            with open(self.filename, 'w', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow(self.header)
 
     def write_row(self, row):
         with self.lock:
@@ -43,12 +39,10 @@ class BufferedParquetWriter:
                 self._flush()
 
     def _flush(self):
-        # Преобразуем буфер в DataFrame и записываем его в файл Parquet
-        df = pd.DataFrame(self.buffer, columns=self.header)
-        table = pa.Table.from_pandas(df)
-        with open(self.filename, 'ab') as f:  # 'ab' — append binary mode
-            pq.write_table(table, f)
-        self.buffer.clear()  # Очистить буфер
+        with open(self.filename, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            while self.buffer:
+                writer.writerow(self.buffer.popleft())
         self.last_flush = time.time()
 
     def _flush_loop(self):
@@ -70,8 +64,8 @@ class BufferedParquetWriter:
         self.flush()
 
 # --- Глобальные объекты и очистка ---
-ticks_writer = BufferedParquetWriter(TICKS_FILE, ["recv_time","timestamp","symbol","price","size","side"])
-ob_writer    = BufferedParquetWriter(OB_FILE,    ["recv_time","symbol","type","seq","u","side","price","size","ts"])
+ticks_writer = BufferedCSVWriter(TICKS_FILE, ["recv_time","timestamp","symbol","price","size","side"])
+ob_writer    = BufferedCSVWriter(OB_FILE,    ["recv_time","symbol","type","seq","u","side","price","size","ts"])
 ws           = None
 last_msg_time= time.time()
 
@@ -85,6 +79,7 @@ def cleanup():
 
 # --- Обработчик сообщений ---
 def handle_msg(msg):
+    # print("RAW MSG:", msg)
     global last_msg_time
     last_msg_time = time.time()  # <<< обновляем таймер при любом сообщении
     recv_dt = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
