@@ -18,24 +18,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # --- Буферизованный Parquet writer ---
 class BufferedParquetWriter:
-    def __init__(self, filename, header):
+    def __init__(self, filename, header, schema):
         self.filename = filename
         self.header   = header
         self.buffer   = deque()
         self.lock     = threading.Lock()
-        self.last_flush = time.time()
         self.stop_evt = threading.Event()
-        self._init_file()
+        self.last_flush = time.time()
+        # Схема из header:
+        self.schema = schema
+        # Создаем ParquetWriter один раз
+        self.writer = pq.ParquetWriter(self.filename, self.schema, compression='snappy')
         self.thread = threading.Thread(target=self._flush_loop, daemon=True)
         self.thread.start()
-
-    def _init_file(self):
-        os.makedirs(os.path.dirname(self.filename) or ".", exist_ok=True)
-        # Если файл не существует, создаём новый пустой DataFrame и сохраняем его как Parquet
-        if not os.path.exists(self.filename) or os.path.getsize(self.filename) == 0:
-            df = pd.DataFrame(columns=self.header)
-            table = pa.Table.from_pandas(df)
-            pq.write_table(table, self.filename)
 
     def write_row(self, row):
         with self.lock:
@@ -44,12 +39,14 @@ class BufferedParquetWriter:
                 self._flush()
 
     def _flush(self):
-        # Преобразуем буфер в DataFrame и записываем его в файл Parquet
         df = pd.DataFrame(self.buffer, columns=self.header)
-        table = pa.Table.from_pandas(df)
-        with open(self.filename, 'ab') as f:  # 'ab' — append binary mode
-            pq.write_table(table, f)
-        self.buffer.clear()  # Очистить буфер
+        # if df['timestamp'].dtype == object:
+        #     df['timestamp'] = pd.to_datetime(df['timestamp'])
+        # if df['recv_time'].dtype == object:
+        #     df['recv_time']   = pd.to_datetime(df['recv_time'])
+        table = pa.Table.from_pandas(df, schema=self.schema)
+        self.writer.write_table(table)   # добавляем row‑group с той же схемой
+        self.buffer.clear()
         self.last_flush = time.time()
 
     def _flush_loop(self):
@@ -68,11 +65,45 @@ class BufferedParquetWriter:
     def close(self):
         self.stop_evt.set()
         self.thread.join(timeout=2)
-        self.flush()
+        with self.lock:
+            if self.buffer:
+                self._flush()
+        self.writer.close()
 
 # --- Глобальные объекты и очистка ---
-ticks_writer = BufferedParquetWriter(TICKS_FILE, ["recv_time","timestamp","symbol","price","size","side"])
-ob_writer    = BufferedParquetWriter(OB_FILE,    ["recv_time","symbol","type","seq","u","side","price","size","ts"])
+ticks_schema = pa.schema([
+    pa.field('recv_time', pa.timestamp('ns'), False),
+    pa.field('timestamp', pa.timestamp('ns'), False),
+    pa.field('symbol',    pa.string(),        False),
+    pa.field('price',     pa.float64(),       False),
+    pa.field('size',      pa.float64(),       False),
+    pa.field('side',      pa.string(),        False),
+])
+ob_schema = pa.schema([
+    pa.field('recv_time', pa.timestamp('ns'), False),
+    pa.field('symbol',    pa.string(),        False),
+    pa.field('type',      pa.string(),        False),
+    pa.field('seq',       pa.int64(),         True),
+    pa.field('u',         pa.int64(),         True),
+    pa.field('side',      pa.string(),        False),
+    pa.field('price',     pa.float64(),       False),
+    pa.field('size',      pa.float64(),       False),
+    pa.field('ts',        pa.int64(),         False),
+])
+def init_writers():
+    ticks_writer = BufferedParquetWriter(
+        TICKS_FILE,
+        ["recv_time","timestamp","symbol","price","size","side"],
+        ticks_schema         # <- вот сюда схема
+    )
+    ob_writer = BufferedParquetWriter(
+        OB_FILE,
+        ["recv_time","symbol","type","seq","u","side","price","size","ts"],
+        ob_schema
+    )
+    return ticks_writer, ob_writer
+
+ticks_writer, ob_writer = init_writers()
 ws           = None
 last_msg_time= time.time()
 
@@ -81,14 +112,32 @@ def cleanup():
     if ws:
         try: ws.exit()
         except: pass
-    ticks_writer.close()
-    ob_writer.close()
+
+    # сначала пробуем flush без schema‑конфликтов
+    try:
+        ticks_writer.flush()
+    except Exception as e:
+        logging.error("ticks_writer.flush() failed: %s", e)
+    try:
+        ob_writer.flush()
+    except Exception as e:
+        logging.error("ob_writer.flush() failed: %s", e)
+
+    # И затем в любом случае закрываем writers
+    try:
+        ticks_writer.writer.close()
+    except:
+        pass
+    try:
+        ob_writer.writer.close()
+    except:
+        pass
 
 # --- Обработчик сообщений ---
 def handle_msg(msg):
     global last_msg_time
     last_msg_time = time.time()  # <<< обновляем таймер при любом сообщении
-    recv_dt = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    recv_dt = datetime.now(timezone.utc).replace(tzinfo=None) #убрал .isoformat()
     topic   = msg.get("topic","")
 
     if topic == f"publicTrade.{SYMBOL}":
@@ -100,7 +149,7 @@ def handle_msg(msg):
                 side  = t["S"]
             except:
                 continue
-            dt = datetime.fromtimestamp(ts/1000,timezone.utc).replace(tzinfo=None).isoformat()
+            dt = datetime.fromtimestamp(ts/1000,timezone.utc).replace(tzinfo=None)
             ticks_writer.write_row([recv_dt, dt, SYMBOL, price, size, side])
 
     elif topic == f"orderbook.{DEPTH}.{SYMBOL}":
@@ -111,6 +160,7 @@ def handle_msg(msg):
             for price_, size_ in items:
                 try:
                     price = float(price_); size = float(size_)
+                    print(f'added: price: {price}, size: {size}')
                 except:
                     continue
                 ob_writer.write_row([recv_dt, SYMBOL, typ, seq, u, side_flag, price, size, ts_s])

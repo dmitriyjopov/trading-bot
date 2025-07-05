@@ -11,6 +11,8 @@ SUBSCRIBE_TOPICS = [
     f"orderbook.{DEPTH}.{SYMBOL}"
 ]
 
+parcer_core.init_writers()
+
 def on_open(ws):
     print(f"[{datetime.now()}] WS opened, subscribing {SUBSCRIBE_TOPICS}")
     ws.send(json.dumps({"op":"subscribe","args":SUBSCRIBE_TOPICS}))
