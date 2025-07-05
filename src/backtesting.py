@@ -2,13 +2,18 @@ from collections import deque, defaultdict
 from datetime import datetime, timezone
 from shlex import join
 import pandas as pd
-import math
+import math, pyarrow.parquet as pq
 from tqdm import tqdm
 '''
 BUCKET_SIZE, WINDOW_LENGTH - ДЛЯ VPIN
 '''
 BUCKET_SIZE = 1000
 WINDOW_LENGTH = 10
+
+def read_parquet_with_progress(path, columns=None):
+    df = pd.read_parquet(path, columns=columns)
+    print(f"Loaded {len(df)} rows from {path}")
+    return df
 
 #VAH, VAL, POC
 def value_area(df, period, step):
@@ -211,8 +216,8 @@ def result_output(va_df, delta, vpin, rf, ofi):
 def main():
     FILE_NAME = str(input("введите путь к файлу, нажмите [d] для дефолтного пути (data.csv)\n"))
     if FILE_NAME == "d":
-        FILE_NAME = "C:/Users/382he/trading-bot/trading-bot/data.csv"
-        OB_FILE_NAME = "C:/Users/382he/trading-bot/trading-bot/orderbook.csv"
+        FILE_NAME = "/Users/a11111/trading-bot/data.parquet"
+        OB_FILE_NAME = "/Users/a11111/trading-bot/orderbook.parquet"
     INPUT = str(input("введите шаг цены, нажмите [d] для дефолтного шага (0.5)\n"))
     if INPUT == "d":
         STEP = 0.5
@@ -224,18 +229,27 @@ def main():
 
     # Индикатор загрузки данных
     print("Загрузка данных...")
-    df = pd.read_csv(FILE_NAME, parse_dates=['recv_time'], delimiter=',')
-    odf = pd.read_csv(OB_FILE_NAME, parse_dates=['recv_time'], delimiter=',')
+    df = read_parquet_with_progress(FILE_NAME)
+    odf = read_parquet_with_progress(OB_FILE_NAME)
+
+    odf['recv_time'] = pd.to_datetime(odf['recv_time'])
+
+    print("Orderbook columns:", odf.columns.tolist())
+    print(odf.head())
+
     print("✓ Данные загружены\n")
 
     # Список задач для отслеживания прогресса
+    start_time = datetime.now()
     tasks = [
         ("Расчет Value Area", lambda: value_area(df, PERIOD, STEP)),
         ("Расчет Volume Delta", lambda: volume_delta(df, PERIOD)),
         ("Расчет VPIN", lambda: VPIN(df.copy(), PERIOD, BUCKET_SIZE, WINDOW_LENGTH)),
-        ("Расчет RF", lambda: RF(va_df)),
+        # ("Расчет RF", lambda: RF(va_df)),
         ("Расчет Order Flow Imbalance", lambda: order_flow_imbalance(odf, PERIOD))
     ]
+    end_time = datetime.now()
+    print(f"Время выполнения: {end_time - start_time}")
 
     results = {}
     progress_bar = tqdm(tasks, desc="Прогресс расчета", unit="задача", dynamic_ncols=True)
@@ -250,6 +264,15 @@ def main():
         except Exception as e:
             progress_bar.set_postfix_str(f"⚠ Ошибка: {str(e)}")
     
+    # Рассчитываем RF после получения Value Area
+    if "Расчет Value Area" in results:
+        try:
+            results["Расчет RF"] = RF(results["Расчет Value Area"])
+            print("✓ RF рассчитан")
+        except Exception as e:
+            print(f"⚠ Ошибка при расчете RF: {str(e)}")
+            results["Расчет RF"] = pd.Series(dtype=float, name='RF')
+
     # Извлекаем результаты
     va_df = results["Расчет Value Area"]
     delta = results["Расчет Volume Delta"]
