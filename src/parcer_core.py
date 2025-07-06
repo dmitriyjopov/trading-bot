@@ -7,8 +7,8 @@ import pandas as pd
 
 # Настройки
 SYMBOL        = "BTCUSDT"
-TICKS_FILE    = os.path.expanduser("data.parquet")
-OB_FILE       = os.path.expanduser("orderbook.parquet")
+# BASE_DIR      = "data"
+# SUBFOLDER     = "BTCUSDT"
 MSG_TIMEOUT   = 30           # сек
 BUFFER_SIZE   = 100
 FLUSH_INTERVAL= 2            # сек
@@ -18,8 +18,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 # --- Буферизованный Parquet writer ---
 class BufferedParquetWriter:
-    def __init__(self, filename, header, schema):
-        self.filename = filename
+    def __init__(self, base_dir, subfolder, header, schema):
+        self.base_dir = base_dir
+        self.subfolder = subfolder
+        self.current_date   = None
+        self.current_writer = None
+        self.current_path   = None
         self.header   = header
         self.buffer   = deque()
         self.lock     = threading.Lock()
@@ -27,10 +31,21 @@ class BufferedParquetWriter:
         self.last_flush = time.time()
         # Схема из header:
         self.schema = schema
-        # Создаем ParquetWriter один раз
-        self.writer = pq.ParquetWriter(self.filename, self.schema, compression='snappy')
         self.thread = threading.Thread(target=self._flush_loop, daemon=True)
         self.thread.start()
+
+    def make_path(self, dt):
+        d = dt.date()
+        out_dir = os.path.join(
+            os.path.expanduser(self.base_dir),
+            self.subfolder,
+            f"year={d.year}",
+            f"month={d.month:02d}",
+            f"day={d.day:02d}"
+        )
+        os.makedirs(out_dir, exist_ok=True)
+        # фиксированное имя: один файл на день
+        return os.path.join(out_dir, f"day={d}.parquet")
 
     def write_row(self, row):
         with self.lock:
@@ -40,12 +55,40 @@ class BufferedParquetWriter:
 
     def _flush(self):
         df = pd.DataFrame(self.buffer, columns=self.header)
-        # if df['timestamp'].dtype == object:
-        #     df['timestamp'] = pd.to_datetime(df['timestamp'])
-        # if df['recv_time'].dtype == object:
-        #     df['recv_time']   = pd.to_datetime(df['recv_time'])
+        # ns -> ms
+        df['recv_time'] = df['recv_time'].astype('datetime64[ms]')
+        if 'timestamp' in df.columns:
+            df['timestamp'] = df['timestamp'].astype('datetime64[ms]')
+
+        # float64 -> float32, int64 -> int32
+        df['price'] = df['price'].astype('float32')
+        df['size'] = df['size'].astype('float32')
+        if 'seq' in df.columns:
+            df['seq'] = df['seq'].astype('int32')
+        if 'u' in df.columns:
+            df['u'] = df['u'].astype('int32')
+
         table = pa.Table.from_pandas(df, schema=self.schema)
-        self.writer.write_table(table)   # добавляем row‑group с той же схемой
+        today = df['recv_time'].dt.date.iloc[0]
+
+        # Если ещё нет writer-а или дата сменилась — создаём новый
+        if self.current_writer is None or self.current_date != today:
+            # Закрываем старый (если был)
+            if self.current_writer is not None:
+                self.current_writer.close()
+
+            self.current_date = today
+            self.current_path = self.make_path(df['recv_time'].iloc[0])
+
+            self.current_writer = pq.ParquetWriter(
+                self.current_path,
+                self.schema,
+                compression='zstd'
+            )
+
+        assert self.current_writer is not None, "ParquetWriter не инициализирован!"
+
+        self.current_writer.write_table(table)
         self.buffer.clear()
         self.last_flush = time.time()
 
@@ -68,7 +111,8 @@ class BufferedParquetWriter:
         with self.lock:
             if self.buffer:
                 self._flush()
-        self.writer.close()
+        if self.current_writer is not None:
+            self.current_writer.close()
 
 # --- Глобальные объекты и очистка ---
 ticks_schema = pa.schema([
@@ -92,23 +136,26 @@ ob_schema = pa.schema([
 ])
 def init_writers():
     ticks_writer = BufferedParquetWriter(
-        TICKS_FILE,
-        ["recv_time","timestamp","symbol","price","size","side"],
-        ticks_schema         # <- вот сюда схема
+        base_dir="./data",  # сделай папку в проекте и вставь ее название сюда
+        subfolder="ticks",
+        header=["recv_time","timestamp","symbol","price","size","side"],
+        schema=ticks_schema
     )
     ob_writer = BufferedParquetWriter(
-        OB_FILE,
-        ["recv_time","symbol","type","seq","u","side","price","size","ts"],
-        ob_schema
+        base_dir="./data",  # сделай папку в проекте и вставь ее название сюда
+        subfolder="orderbook",
+        header=["recv_time","symbol","type","seq","u","side","price","size","ts"],
+        schema=ob_schema
     )
+
     return ticks_writer, ob_writer
 
 ticks_writer, ob_writer = init_writers()
 ws           = None
-last_msg_time= time.time()
+# last_msg_time= time.time() #добавить позже
 
 def cleanup():
-    logging.info("Cleaning up...")
+    logging.info("Exiting websocket...")
     if ws:
         try: ws.exit()
         except: pass
@@ -123,20 +170,20 @@ def cleanup():
     except Exception as e:
         logging.error("ob_writer.flush() failed: %s", e)
 
-    # И затем в любом случае закрываем writers
+    # Закрываем writers
     try:
-        ticks_writer.writer.close()
-    except:
-        pass
+        ticks_writer.close()
+    except Exception as e:
+        logging.error("ticks_writer.close() failed: %s", e)
     try:
-        ob_writer.writer.close()
-    except:
-        pass
+        ob_writer.close()
+    except Exception as e:
+        logging.error("ob_writer.close() failed: %s", e)
 
 # --- Обработчик сообщений ---
 def handle_msg(msg):
-    global last_msg_time
-    last_msg_time = time.time()  # <<< обновляем таймер при любом сообщении
+    # global last_msg_time
+    # last_msg_time = time.time()  #добавить позже
     recv_dt = datetime.now(timezone.utc).replace(tzinfo=None) #убрал .isoformat()
     topic   = msg.get("topic","")
 
