@@ -1,2 +1,2 @@
 # tbot
-первая попытка в algotrading
+kostya_bakaikin sosal mne penis

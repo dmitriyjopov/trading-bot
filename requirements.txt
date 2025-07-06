@@ -3,3 +3,4 @@ pybit
 tqdm
 pyarrow
 parquet
+parquet-tools
