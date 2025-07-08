@@ -4,7 +4,9 @@ from shlex import join
 import pandas as pd
 import math, pyarrow.parquet as pq, os, glob
 from tqdm import tqdm
-import keyboard
+import numpy as np
+from numba import njit
+# import keyboard
 '''
 BUCKET_SIZE, WINDOW_LENGTH - ДЛЯ VPIN
 '''
@@ -39,11 +41,14 @@ def read_parquet_range(base_dir, subfolder, start_date=None, end_date=None):
     else:
         return pd.DataFrame()
 
+def cummulutive_delta(df, period):
+    df['signed_size'] = df['size'] * df['side'].map({'Buy':1, 'Sell':-1})#размечаю с учетом знака
+    
+    bar_delta = (
+        df.set_index('recv_time')['signed_size'].resample(period).sum().fillna(0)
+    )
 
-# def read_parquet_with_progress(path, columns=None):
-#     df = pd.read_parquet(path, columns=columns)
-#     print(f"Loaded {len(df)} rows from {path}")
-#     return df
+    return bar_delta.cumsum().rename('cum_delta')
 
 #VAH, VAL, POC
 def value_area(df, period, step):
@@ -136,118 +141,75 @@ def VPIN(df, period, bucket_size, window_length):
     # ресемплируем по времени: усредняем imbalance за период
     return df.resample(period, on='recv_time')['imbalance'].mean().rename('VPIN')
 
-def order_flow_imbalance(ob_df, period):
-    """
-    Рассчитывает Order Flow Imbalance (OFI) на основе данных стакана
+@njit
+def _ofi_numba(ts_ns, typ, side, price, size, t0, period_ns, max_bins):
+    # используем Numba‑dict для текущего стакана
+    bids = dict()
+    asks = dict()
+    # ofi по бинам
+    ofi = np.zeros(max_bins, dtype=np.float64)
+    for i in range(ts_ns.shape[0]):
+        t = ts_ns[i]
+        bin_idx = (t - t0) // period_ns
+        if typ[i] == 0:  # snapshot
+            bids.clear()
+            asks.clear()
+        else:            # delta
+            p = price[i]
+            s = size[i]
+            if side[i] == 0:  # Buy‑level
+                old = bids.get(p, 0.0)
+                dv  = old - s
+                if dv > 0.0:
+                    if dv > 0.0:
+                        ofi[bin_idx] -= dv * price[i]
+                if s > 0.0:
+                    bids[p] = s
+                else:
+                    # удаляем, если size=0
+                    if p in bids: del bids[p]
+            else:             # Sell‑level
+                old = asks.get(p, 0.0)
+                dv  = old - s
+                if dv > 0.0:
+                    ofi[bin_idx] += dv * price[i]
+                if s > 0.0:
+                    asks[p] = s
+                else:
+                    if p in asks: del asks[p]
+    return ofi
+
+def process_order_flow_imbalance(odf: pd.DataFrame, period: str) -> pd.Series:
+    # 1) Сортировка и подготовка
+    df = odf.sort_values('recv_time')
+    df['recv_time'] = pd.to_datetime(df['recv_time'])
     
-    Параметры:
-    ob_df (DataFrame): DataFrame с данными стакана
-    period (str): частота группировки (например, '1h')
+    # Базовая метка t0 и период
+    t0 = df['recv_time'].view('int64').iat[0]
+    period_ns = pd.to_timedelta(period).value
+    # Вычисляем количество бинов
+    t_last = df['recv_time'].view('int64').iat[-1]
+    max_bins = int((t_last - t0) // period_ns) + 1
     
-    Возвращает:
-    Series: OFI для каждого временного интервала
-    """
-    if ob_df.empty:
-        return pd.Series(dtype=float, name='OFI')
+    # 2) К массивам
+    ts_ns   = df['recv_time'].view('int64').to_numpy()
+    typ     = (df['type']=='delta').to_numpy(np.int8)
+    side    = (df['side']=='Sell').to_numpy(np.int8)
+    price   = df['price'].to_numpy(np.float64)
+    size    = df['size'].to_numpy(np.float64)
     
-    # Подготовка данных
-    ob_df['price'] = ob_df['price'].astype(float)
-    ob_df['size'] = ob_df['size'].astype(float)
-    ob_df['recv_time'] = pd.to_datetime(ob_df['recv_time'])
+    # 3) Запуск Numba‑функции
+    ofi_vals = _ofi_numba(ts_ns, typ, side, price, size, t0, period_ns, max_bins)
     
-    # Сортировка по времени и идентификатору обновления (u)
-    ob_df = ob_df.sort_values(['recv_time', 'u'])
-    
-    # Инициализация состояния
-    current_bids = {}
-    current_asks = {}
-    ofi_accumulator = 0.0
-    results = {}
-    current_interval = None
-    
-    # Группировка по событиям (используем 'u' как идентификатор события)
-    grouped = ob_df.groupby(['recv_time', 'u', 'type'])
-    
-    for (recv_time, u, event_type), group in grouped:
-        # Определение начала интервала
-        interval_start = recv_time.floor(period)
-        
-        # Инициализация интервала
-        if current_interval is None:
-            current_interval = interval_start
-        
-        # Сохранение результатов при смене интервала
-        if interval_start != current_interval:
-            results[current_interval] = ofi_accumulator
-            ofi_accumulator = 0.0
-            current_interval = interval_start
-        
-        # Обработка снимка стакана
-        if event_type == 'snapshot':
-            current_bids = {}
-            current_asks = {}
-            
-            # Разделение на биды и аски
-            bids = group[group['side'] == 'Buy']
-            asks = group[group['side'] == 'Sell']
-            
-            #заполняет словари текущими значениями
-            for _, row in bids.iterrows():
-                current_bids[row['price']] = row['size']
-                
-            for _, row in asks.iterrows():
-                current_asks[row['price']] = row['size']
-        
-        # Обработка изменений (delta)
-        elif event_type == 'delta':
-            for _, row in group.iterrows():
-                price = row['price']
-                size = row['size']
-                side = row['side']
-                
-                if side == 'Buy':  # Изменение бида
-                    old_size = current_bids.get(price, 0.0)
-                    delta_v = old_size - size
-                    
-                    # Учитываем только уменьшение объема
-                    if delta_v > 0:
-                        ofi_accumulator -= delta_v * price
-                    
-                    # Обновление стакана
-                    if size > 0:
-                        current_bids[price] = size
-                    elif price in current_bids:
-                        del current_bids[price]
-                        
-                elif side == 'Sell':  # Изменение аска
-                    old_size = current_asks.get(price, 0.0)
-                    delta_v = old_size - size
-                    
-                    if delta_v > 0:
-                        ofi_accumulator += delta_v * price
-                    
-                    if size > 0:
-                        current_asks[price] = size
-                    elif price in current_asks:
-                        del current_asks[price]
-    
-    # Добавление последнего интервала
-    if current_interval is not None:
-        results[current_interval] = round(ofi_accumulator, 5)
-    
-    # Создание временного ряда
-    ofi_series = pd.Series(results, name='OFI')
-    ofi_series.index = pd.to_datetime(ofi_series.index)
-    return ofi_series
+    # 4) Время каждой бины
+    bin_times = pd.to_datetime(t0 + np.arange(max_bins, dtype=np.int64)*period_ns)
+    return pd.Series(ofi_vals, index=bin_times, name='OFI')
+
 
 def result_output(va_df, delta, vpin, rf, ofi):
     return pd.concat([va_df, delta, vpin, rf, ofi], axis=1)
 
 def main():
-    FILE_NAME = str(input("введите путь к файлу, нажмите [d] для дефолтного пути (data.csv)\n"))
-    if FILE_NAME == "d":
-        FILE_NAME = "/Users/a11111/trading-bot/data.parquet"
-        OB_FILE_NAME = "/Users/a11111/trading-bot/orderbook.parquet"
     INPUT = str(input("введите шаг цены, нажмите [d] для дефолтного шага (0.5)\n"))
     if INPUT == "d":
         STEP = 0.5
@@ -272,34 +234,40 @@ def main():
 
     odf['recv_time'] = pd.to_datetime(odf['recv_time'])
 
-    print("Orderbook columns:", odf.columns.tolist())
-    print(odf.head())
-
     print("✓ Данные загружены\n")
 
     # Список задач для отслеживания прогресса
     start_time = datetime.now()
     tasks = [
-        ("Расчет Value Area", lambda: value_area(df, PERIOD, STEP)),
-        ("Расчет Volume Delta", lambda: volume_delta(df, PERIOD)),
+        ("Расчет Cummulative Delta", lambda: cummulutive_delta(df.copy(), PERIOD)),
+        ("Расчет Value Area", lambda: value_area(df.copy(), PERIOD, STEP)),
+        ("Расчет Volume Delta", lambda: volume_delta(df.copy(), PERIOD)),
         ("Расчет VPIN", lambda: VPIN(df.copy(), PERIOD, BUCKET_SIZE, WINDOW_LENGTH)),
         # ("Расчет RF", lambda: RF(va_df)),
-        ("Расчет Order Flow Imbalance", lambda: order_flow_imbalance(odf, PERIOD))
+        ("Расчет Order Flow Imbalance", lambda: process_order_flow_imbalance(odf, PERIOD))
     ]
-    end_time = datetime.now()
 
     results = {}
+    task_times = {}
     progress_bar = tqdm(tasks, desc="Прогресс расчета", unit="задача", dynamic_ncols=True)
 
     # Выполняем задачи с отображением прогресса
     for task_name, task_func in progress_bar:
         progress_bar.set_description(f"Выполняется {task_name}")
         try:
+            t_start = datetime.now()
             result = task_func()
+            t_end = datetime.now()
+            elapsed = t_end - t_start
             results[task_name] = result
-            progress_bar.set_postfix_str("✓ Успешно")
+            task_times[task_name] = elapsed
+            progress_bar.set_postfix_str(f"✓ Успешно за {elapsed}")
+            print(f"{task_name} выполнена за {elapsed}")
         except Exception as e:
             progress_bar.set_postfix_str(f"⚠ Ошибка: {str(e)}")
+            print(f"{task_name} ошибка: {str(e)}")
+
+    end_time = datetime.now()
     
     # Рассчитываем RF после получения Value Area
     if "Расчет Value Area" in results:
@@ -312,7 +280,8 @@ def main():
 
     # Извлекаем результаты
     va_df = results["Расчет Value Area"]
-    delta = results["Расчет Volume Delta"]
+    vol_delta = results["Расчет Volume Delta"]
+    cum_delta = results["Расчет Cummulative Delta"]
     vpin = results["Расчет VPIN"]
     rf = results["Расчет RF"]
     ofi = results["Расчет Order Flow Imbalance"]
@@ -325,17 +294,22 @@ def main():
         'VAH': float,
         'VAL': float
     })
-    delta = delta.rename('volume_delta')
-    delta.index.name = 'recv_time'
+    vol_delta = vol_delta.rename('volume_delta')
+    vol_delta.index.name = 'recv_time'
+    cum_delta = cum_delta.rename('cum_delta')
+    cum_delta.index.name = 'recv_time'
 
     # Сборка результатов
     print("Формирование итоговой таблицы...")
-    results_df = pd.concat([va_df, delta, vpin, rf, ofi], axis=1)
+    results_df = pd.concat([va_df, vol_delta, cum_delta, vpin, rf, ofi], axis=1)
     
     print("\n✓ Расчет завершен! Результаты:")
     print(results_df)
 
     print(f"Время выполнения расчета: {end_time - start_time}")
+    print(f"\nВремя выполнения по задачам:")
+    for task_name, elapsed in task_times.items():
+        print(f"{task_name}: {elapsed}")
 
 
 if __name__ == "__main__":
