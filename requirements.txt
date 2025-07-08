@@ -4,3 +4,5 @@ tqdm
 pyarrow
 parquet
 parquet-tools
+numpy
+numba
