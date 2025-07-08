@@ -2,18 +2,48 @@ from collections import deque, defaultdict
 from datetime import datetime, timezone
 from shlex import join
 import pandas as pd
-import math, pyarrow.parquet as pq
+import math, pyarrow.parquet as pq, os, glob
 from tqdm import tqdm
+import keyboard
 '''
 BUCKET_SIZE, WINDOW_LENGTH - ДЛЯ VPIN
 '''
 BUCKET_SIZE = 1000
 WINDOW_LENGTH = 10
 
-def read_parquet_with_progress(path, columns=None):
-    df = pd.read_parquet(path, columns=columns)
-    print(f"Loaded {len(df)} rows from {path}")
-    return df
+def read_parquet_range(base_dir, subfolder, start_date=None, end_date=None):
+    """
+    Читает все parquet-файлы из поддиректории (ticks/orderbook) за указанный диапазон дат.
+    Если даты не указаны — читает все файлы.
+    """
+    pattern = os.path.join(
+        base_dir, subfolder, "year=*", "month=*", "day=*", "day=*.parquet"
+    )
+    files = glob.glob(pattern)
+    if not files:
+        raise FileNotFoundError(f"No files found in {pattern}")
+    
+    dfs = []
+    for file in files:
+        fname = os.path.basename(file)
+        date_str = fname.replace("day=", "").replace(".parquet", "")
+        if start_date or end_date:
+            file_date = pd.to_datetime(date_str)
+            if start_date and file_date < pd.to_datetime(start_date):
+                continue
+            if end_date and file_date > pd.to_datetime(end_date):
+                continue
+        dfs.append(pd.read_parquet(file))
+    if dfs:
+        return pd.concat(dfs, ignore_index=True)
+    else:
+        return pd.DataFrame()
+
+
+# def read_parquet_with_progress(path, columns=None):
+#     df = pd.read_parquet(path, columns=columns)
+#     print(f"Loaded {len(df)} rows from {path}")
+#     return df
 
 #VAH, VAL, POC
 def value_area(df, period, step):
@@ -227,10 +257,18 @@ def main():
     if PERIOD == "d":
         PERIOD = "1h"
 
-    # Индикатор загрузки данных
-    print("Загрузка данных...")
-    df = read_parquet_with_progress(FILE_NAME)
-    odf = read_parquet_with_progress(OB_FILE_NAME)
+    # Индикатор загрузки данныхˆ
+    print("Введите диапазон дат в формате 01-01-2001 или введите [d] для анализа всех данных")
+    if (input() == 'd'):
+        start_date = None
+        end_date = None
+    else:
+        start_date = str(input("Начальная дата: "))
+        end_date = str(input("Конечная дата: "))
+
+    print('Загрузка данных...')
+    df = read_parquet_range('./data', 'ticks', start_date, end_date)
+    odf = read_parquet_range('./data', 'orderbook', start_date, end_date)
 
     odf['recv_time'] = pd.to_datetime(odf['recv_time'])
 
@@ -249,7 +287,6 @@ def main():
         ("Расчет Order Flow Imbalance", lambda: order_flow_imbalance(odf, PERIOD))
     ]
     end_time = datetime.now()
-    print(f"Время выполнения: {end_time - start_time}")
 
     results = {}
     progress_bar = tqdm(tasks, desc="Прогресс расчета", unit="задача", dynamic_ncols=True)
@@ -297,6 +334,8 @@ def main():
     
     print("\n✓ Расчет завершен! Результаты:")
     print(results_df)
+
+    print(f"Время выполнения расчета: {end_time - start_time}")
 
 
 if __name__ == "__main__":
