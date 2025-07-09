@@ -6,6 +6,7 @@ WS_URL = "wss://stream.bybit.com/v5/public/linear"
 SYMBOL = parcer_core.SYMBOL   # "ETHUSDT"
 DEPTH  = parcer_core.DEPTH    # 50
 
+
 SUBSCRIBE_TOPICS = [
     f"publicTrade.{SYMBOL}",
     f"orderbook.{DEPTH}.{SYMBOL}"
@@ -25,6 +26,8 @@ def on_message(ws, message):
         print(f"[{datetime.now()}][RAW OB] type={msg.get('type')} seq={msg.get('data',{}).get('seq')}")
     # Передаём в парсер
     parcer_core.handle_msg(msg)
+    # Обновляем время последнего сообщения
+    parcer_core.last_msg_time = time.time()
 
 def on_error(ws, error):
     print("WS error:", error)
@@ -51,3 +54,6 @@ ws_app = websocket.WebSocketApp(
     on_close=on_close
 )
 ws_app.run_forever()
+
+
+parcer_core.run_reconnect_loop()

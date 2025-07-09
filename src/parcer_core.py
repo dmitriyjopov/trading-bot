@@ -5,6 +5,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pandas as pd
 
+
+
 # Настройки
 SYMBOL        = "BTCUSDT"
 # BASE_DIR      = "data"
@@ -182,10 +184,10 @@ def cleanup():
 
 # --- Обработчик сообщений ---
 def handle_msg(msg):
-    # global last_msg_time
-    # last_msg_time = time.time()  #добавить позже
+    global last_msg_time
+    last_msg_time = datetime.now()  #добавить позже
     recv_dt = datetime.now(timezone.utc).replace(tzinfo=None) #убрал .isoformat()
-    topic   = msg.get("topic","")
+    topic = msg.get("topic","")
 
     if topic == f"publicTrade.{SYMBOL}":
         for t in msg.get("data",[]):
@@ -214,50 +216,55 @@ def handle_msg(msg):
 
 # --- Основной reconnect-цикл ---
 
-# while True:
-#     try:
-#         # 1) Создаём WS и подписываемся
-#         ws = WebSocket(testnet=False, channel_type="linear")
-#         ws.trade_stream(symbol=SYMBOL,         callback=handle_message)
-#         ws.orderbook_stream(symbol=SYMBOL,     depth=DEPTH, callback=handle_message)
+def run_reconnect_loop():
+    global last_msg_time, ws
 
-#         # Сразу после подписки сбрасываем таймер и backoff
-#         last_msg_time = time.time()
-#         backoff       = 1
+    backoff = 1
+    while True:
+        try:
+            # 1) Создаём WS и подписываемся
+            #ws = WebSocket(testnet=False, channel_type="linear")
+            #ws.trade_stream(symbol=SYMBOL,         callback=handle_msg)
+            #ws.orderbook_stream(symbol=SYMBOL,     depth=DEPTH, callback=handle_msg)
 
-#         # 2) Мониторим таймаут ping/pong
-#         stop_evt = threading.Event()
-#         def monitor():
-#             logging.info("Monitor started")
-#             while not stop_evt.is_set():
-#                 if time.time() - last_msg_time > MSG_TIMEOUT:
-#                     logging.warning("No messages for %s s, restarting WS", MSG_TIMEOUT)
-#                     try: 
-#                         if ws: ws.exit()
-#                     except: pass
-#                     stop_evt.set()
-#                     break
-#                 time.sleep(1)
-#             logging.info("Monitor exiting")
+            # Сразу после подписки сбрасываем таймер и backoff
+            last_msg_time = datetime.now()
+            
 
-#         mon_t = threading.Thread(target=monitor, daemon=True)
-#         mon_t.start()
+            # 2) Мониторим таймаут ping/pong
+            stop_evt = threading.Event()
+            def monitor():
+                logging.info("Monitor started")
+                while not stop_evt.is_set():
+                    elapsed = (datetime.now() - last_msg_time).total_seconds()
+                    if elapsed> MSG_TIMEOUT:
+                        logging.warning("No messages for %s s, restarting WS", MSG_TIMEOUT)
+                        try: 
+                            if ws: ws.exit()
+                        except: pass
+                        stop_evt.set()
+                        break
+                    time.sleep(1)
+                logging.info("Monitor exiting")
 
-#         # 3) Ждём сигнала от монитора
-#         logging.info("Main waiting...")
-#         while not stop_evt.is_set():
-#             time.sleep(1)
-#         mon_t.join(timeout=2)
+            mon_t = threading.Thread(target=monitor, daemon=True)
+            mon_t.start()
 
-#     except KeyboardInterrupt:
-#         logging.info("Interrupted by user")
-#         cleanup()
-#         break
+            # 3) Ждём сигнала от монитора
+            logging.info("Main waiting...")
+            while not stop_evt.is_set():
+                time.sleep(1)
+            mon_t.join(timeout=2)
 
-#     except Exception:
-#         logging.exception("Error, reconnecting in %s s", backoff)
-#         ticks_writer.flush()
-#         ob_writer.flush()
-#         time.sleep(backoff)
-#         backoff = min(backoff*2, 60)
-#         continue
+        except KeyboardInterrupt:
+            logging.info("Interrupted by user")
+            cleanup()
+            break
+
+        except Exception:
+            logging.exception("Error, reconnecting in %s s", backoff)
+            ticks_writer.flush()
+            ob_writer.flush()
+            time.sleep(backoff)
+            backoff = min(backoff*2, 60)
+            continue
