@@ -204,6 +204,101 @@ def process_order_flow_imbalance(odf: pd.DataFrame, period: str) -> pd.Series:
     # 4) Время каждой бины
     bin_times = pd.to_datetime(t0 + np.arange(max_bins, dtype=np.int64)*period_ns)
     return pd.Series(ofi_vals, index=bin_times, name='OFI')
+#KYLE LAMBDA
+def kyle_lambda_vectorized(prices, volumes, sides, timestamps, window_size_ns):
+    """
+    Векторизованный расчет Kyle's Lambda с использованием Numba.
+    
+    Параметры:
+        prices: np.array[float] - цены сделок
+        volumes: np.array[float] - объемы сделок
+        sides: np.array[int] - направления сделок (1 для покупок, -1 для продаж)
+        timestamps: np.array[int64] - временные метки в наносекундах
+        window_size_ns: int64 - размер окна в наносекундах
+        
+    Возвращает:
+        tuple: (window_starts, lambda_values) - временные метки и значения λ
+    """
+    n = len(prices)
+    if n < 2:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+    
+    # Вычисляем знаковые объемы и изменения цен
+    signed_volumes = volumes * sides
+    price_changes = np.zeros(n, dtype=np.float64)
+    price_changes[1:] = prices[1:] - prices[:-1]
+    
+    # Определяем границы окон
+    first_ts = timestamps[0]
+    last_ts = timestamps[-1]
+    n_windows = int((last_ts - first_ts) // window_size_ns) + 1
+    window_starts = first_ts + np.arange(n_windows) * window_size_ns
+    
+    # Инициализация результатов
+    lambda_values = np.full(n_windows, np.nan, dtype=np.float64)
+    
+    for i in range(n_windows):
+        window_start = window_starts[i]
+        window_end = window_start + window_size_ns
+        
+        # Находим сделки в текущем окне
+        mask = (timestamps >= window_start) & (timestamps < window_end)
+        if not mask.any():
+            continue
+            
+        window_price_changes = price_changes[mask]
+        window_signed_volumes = signed_volumes[mask]
+        
+        # Удаляем NaN значения
+        valid_mask = ~np.isnan(window_price_changes) & ~np.isnan(window_signed_volumes)
+        window_price_changes = window_price_changes[valid_mask]
+        window_signed_volumes = window_signed_volumes[valid_mask]
+        
+        if len(window_price_changes) < 2:
+            continue
+            
+        # Вычисляем ковариацию и дисперсию
+        cov_matrix = np.cov(window_price_changes, window_signed_volumes)
+        cov = cov_matrix[0, 1]
+        var_volume = np.var(window_signed_volumes)
+        
+        if var_volume > 0:
+            lambda_values[i] = cov / var_volume
+            
+    return window_starts, lambda_values
+
+def vectorized_kyle_lambda(df, period='1h'):
+    """
+    Векторизованный расчет Kyle's Lambda для DataFrame.
+    
+    Параметры:
+        df: pd.DataFrame - DataFrame с тиковыми данными
+        period: str - период агрегации (например, '1h')
+        
+    Возвращает:
+        pd.Series - ряд значений Kyle's Lambda с временным индексом
+    """
+    if df.empty:
+        return pd.Series(dtype=float)
+    
+    # Преобразуем данные в numpy массивы
+    timestamps = df['recv_time'].astype(np.int64).to_numpy()  # Преобразуем в наносекунды
+    prices = df['price'].to_numpy()
+    volumes = df['size'].to_numpy()
+    sides = np.where(df['side'] == 'Buy', 1, -1)
+    
+    # Вычисляем размер окна в наносекундах
+    window_size_ns = pd.to_timedelta(period).value
+    
+    # Вычисляем Kyle's Lambda
+    window_starts, lambda_values = kyle_lambda_vectorized(
+        prices, volumes, sides, timestamps, window_size_ns
+    )
+    
+    # Создаем Series с временным индексом
+    index = pd.to_datetime(window_starts)
+    return pd.Series(lambda_values, index=index, name='Kyle_Lambda')
+
 
 
 def result_output(va_df, delta, vpin, rf, ofi):
@@ -244,7 +339,8 @@ def main():
         ("Расчет Volume Delta", lambda: volume_delta(df.copy(), PERIOD)),
         ("Расчет VPIN", lambda: VPIN(df.copy(), PERIOD, BUCKET_SIZE, WINDOW_LENGTH)),
         # ("Расчет RF", lambda: RF(va_df)),
-        ("Расчет Order Flow Imbalance", lambda: process_order_flow_imbalance(odf, PERIOD))
+        ("Расчет Order Flow Imbalance", lambda: process_order_flow_imbalance(odf, PERIOD)),
+        ("Расчет Kyle's Lambda", lambda: vectorized_kyle_lambda(df.copy(), PERIOD))
     ]
 
     results = {}
@@ -285,7 +381,7 @@ def main():
     vpin = results["Расчет VPIN"]
     rf = results["Расчет RF"]
     ofi = results["Расчет Order Flow Imbalance"]
-
+    kyle_lambda = results["Расчет Kyle's Lambda"]
     # Дополнительные преобразования
     print("\nФинальные преобразования данных...")
     va_df = va_df.astype({
@@ -301,7 +397,7 @@ def main():
 
     # Сборка результатов
     print("Формирование итоговой таблицы...")
-    results_df = pd.concat([va_df, vol_delta, cum_delta, vpin, rf, ofi], axis=1)
+    results_df = pd.concat([va_df, vol_delta, cum_delta, vpin, rf, ofi, kyle_lambda], axis=1)
     
     print("\n✓ Расчет завершен! Результаты:")
     print(results_df)
@@ -310,7 +406,7 @@ def main():
     print(f"\nВремя выполнения по задачам:")
     for task_name, elapsed in task_times.items():
         print(f"{task_name}: {elapsed}")
-
+    
 
 if __name__ == "__main__":
     main()
