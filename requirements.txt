@@ -6,3 +6,4 @@ parquet
 parquet-tools
 numpy
 numba
+matplotlib
