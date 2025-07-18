@@ -1,4 +1,5 @@
 import csv, os, time, logging, threading, signal, atexit
+import websocket, json
 from datetime import datetime, timezone
 from collections import deque
 import pyarrow as pa
@@ -9,9 +10,6 @@ import pandas as pd
 
 # Настройки
 SYMBOL        = "BTCUSDT"
-# BASE_DIR      = "data"
-# SUBFOLDER     = "BTCUSDT"
-MSG_TIMEOUT   = 30           # сек
 BUFFER_SIZE   = 100
 FLUSH_INTERVAL= 2            # сек
 DEPTH         = 50
@@ -185,7 +183,7 @@ def cleanup():
 # --- Обработчик сообщений ---
 def handle_msg(msg):
     global last_msg_time
-    last_msg_time = datetime.now()  #добавить позже
+    last_msg_time = time.time()  #добавить позже
     recv_dt = datetime.now(timezone.utc).replace(tzinfo=None) #убрал .isoformat()
     topic = msg.get("topic","")
 
@@ -213,58 +211,3 @@ def handle_msg(msg):
                 except:
                     continue
                 ob_writer.write_row([recv_dt, SYMBOL, typ, seq, u, side_flag, price, size, ts_s])
-
-# --- Основной reconnect-цикл ---
-
-def run_reconnect_loop():
-    global last_msg_time, ws
-
-    backoff = 1
-    while True:
-        try:
-            # 1) Создаём WS и подписываемся
-            #ws = WebSocket(testnet=False, channel_type="linear")
-            #ws.trade_stream(symbol=SYMBOL,         callback=handle_msg)
-            #ws.orderbook_stream(symbol=SYMBOL,     depth=DEPTH, callback=handle_msg)
-
-            # Сразу после подписки сбрасываем таймер и backoff
-            last_msg_time = datetime.now()
-            
-
-            # 2) Мониторим таймаут ping/pong
-            stop_evt = threading.Event()
-            def monitor():
-                logging.info("Monitor started")
-                while not stop_evt.is_set():
-                    elapsed = (datetime.now() - last_msg_time).total_seconds()
-                    if elapsed> MSG_TIMEOUT:
-                        logging.warning("No messages for %s s, restarting WS", MSG_TIMEOUT)
-                        try: 
-                            if ws: ws.exit()
-                        except: pass
-                        stop_evt.set()
-                        break
-                    time.sleep(1)
-                logging.info("Monitor exiting")
-
-            mon_t = threading.Thread(target=monitor, daemon=True)
-            mon_t.start()
-
-            # 3) Ждём сигнала от монитора
-            logging.info("Main waiting...")
-            while not stop_evt.is_set():
-                time.sleep(1)
-            mon_t.join(timeout=2)
-
-        except KeyboardInterrupt:
-            logging.info("Interrupted by user")
-            cleanup()
-            break
-
-        except Exception:
-            logging.exception("Error, reconnecting in %s s", backoff)
-            ticks_writer.flush()
-            ob_writer.flush()
-            time.sleep(backoff)
-            backoff = min(backoff*2, 60)
-            continue
