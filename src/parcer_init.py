@@ -40,7 +40,7 @@ def cleanup_and_exit(signum=None, frame=None):
     parcer_core.cleanup()
     exit(0)
 
-def montor(stop_evt, ws_app):
+def monitor(stop_evt, ws_app):
     logging.info("Monitor started")
     while not stop_evt.is_set():
         if time.time() - parcer_core.last_msg_time > MSG_TIMEOUT:
