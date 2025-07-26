@@ -207,7 +207,6 @@ def handle_msg(msg):
             for price_, size_ in items:
                 try:
                     price = float(price_); size = float(size_)
-                    print(f'added: price: {price}, size: {size}')
                 except:
                     continue
                 ob_writer.write_row([recv_dt, SYMBOL, typ, seq, u, side_flag, price, size, ts_s])

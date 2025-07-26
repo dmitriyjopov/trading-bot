@@ -40,6 +40,19 @@ def cleanup_and_exit(signum=None, frame=None):
     parcer_core.cleanup()
     exit(0)
 
+def montor(stop_evt, ws_app):
+    logging.info("Monitor started")
+    while not stop_evt.is_set():
+        if time.time() - parcer_core.last_msg_time > MSG_TIMEOUT:
+            logging.warning(f"No messages for {MSG_TIMEOUT}s, restarting WS")
+            try:
+                ws_app.close()
+            except:
+                pass
+            break
+        time.sleep(1)
+    logging.info("Monitor exiting")
+
 # Регистрируем обработчики сигнала
 signal.signal(signal.SIGINT, cleanup_and_exit)
 signal.signal(signal.SIGTERM, cleanup_and_exit)
@@ -61,39 +74,33 @@ def run_reconnect_loop():
         
         # 2) Мониторим таймаут ping/pong
         stop_evt = threading.Event()
-        def monitor():
-            logging.info("Monitor started")
-            while not stop_evt.is_set():
-                if time.time() - parcer_core.last_msg_time > MSG_TIMEOUT:
-                    logging.warning("No messages for %s s, restarting WS", MSG_TIMEOUT)
-                    ws_app.close()
-                    break
-                time.sleep(1)
-            logging.info("Monitor exiting")
-
-        mon_t = threading.Thread(target=monitor, daemon=True)
+        mon_t = threading.Thread(target=monitor, args=(stop_evt, ws_app))
+        mon_t.daemon = True
         mon_t.start()
 
         try:
-            ws_app.run_forever(ping_interval=MSG_TIMEOUT, ping_timeout=MSG_TIMEOUT/2)
-            # 3) Ждём сигнала от монитора
-            logging.info("Main waiting...")
-            while not stop_evt.is_set():
-                time.sleep(1)
-            mon_t.join(timeout=2)
+            logging.info("Starting WebSocket connection...")
+            ws_app.run_forever(
+                ping_interval=MSG_TIMEOUT, 
+                ping_timeout=MSG_TIMEOUT//2
+            )
 
-        except KeyboardInterrupt:
-            logging.info("Interrupted by user")
-            parcer_core.cleanup()
-            break
+        except Exception as e:
+            logging.error(f"WebSocket error: {e}")
 
-        except Exception:
-            logging.exception("Error, reconnecting in %s s", backoff)
-            parcer_core.ticks_writer.flush()
-            parcer_core.ob_writer.flush()
-            time.sleep(backoff)
-            backoff = min(backoff*2, 60)
-            continue
+        finally:
+            # Останавливаем монитор
+            stop_evt.set()
+            mon_t.join(timeout=2.0)
+            if mon_t.is_alive():
+                logging.warning("Monitor thread did not exit gracefully")
+            
+            # Принудительно сбрасываем состояние
+            ws_app.keep_running = False
+
+        logging.info(f"Reconnecting in {backoff} seconds...")
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 60)  # Экспоненциальная задержка
 
 if __name__ == "__main__":
     run_reconnect_loop()
