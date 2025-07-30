@@ -1,5 +1,5 @@
 import websocket, json, threading, time, signal, atexit, logging
-import parcer_core  # только функции и писатели
+import parcer_core
 from datetime import datetime, timezone
 
 WS_URL = "wss://stream.bybit.com/v5/public/linear"
@@ -21,11 +21,11 @@ def on_open(ws):
 
 def on_message(ws, message):
     msg = json.loads(message)
-    # Для отладки:
+    #для отладки:
     topic = msg.get("topic","")
     if topic.startswith("orderbook"):
         print(f"[{datetime.now()}][RAW OB] type={msg.get('type')} seq={msg.get('data',{}).get('seq')}")
-    # Передаём в парсер
+    #передаем в парсер
     parcer_core.handle_msg(msg)
 
 def on_error(ws, error):
@@ -53,7 +53,7 @@ def monitor(stop_evt, ws_app):
         time.sleep(1)
     logging.info("Monitor exiting")
 
-# Регистрируем обработчики сигнала
+#регистрируем обработчики сигнала
 signal.signal(signal.SIGINT, cleanup_and_exit)
 signal.signal(signal.SIGTERM, cleanup_and_exit)
 atexit.register(parcer_core.cleanup)
@@ -61,7 +61,7 @@ atexit.register(parcer_core.cleanup)
 def run_reconnect_loop():
     backoff = 1
     while True:
-        # Запуск WS
+        #запуск WS
         ws_app = websocket.WebSocketApp(
             WS_URL,
             on_open=on_open,
@@ -72,7 +72,7 @@ def run_reconnect_loop():
 
         parcer_core.last_msg_time = time.time()
         
-        # 2) Мониторим таймаут ping/pong
+        # 2)мониторим таймаут ping/pong
         stop_evt = threading.Event()
         mon_t = threading.Thread(target=monitor, args=(stop_evt, ws_app))
         mon_t.daemon = True
@@ -89,13 +89,13 @@ def run_reconnect_loop():
             logging.error(f"WebSocket error: {e}")
 
         finally:
-            # Останавливаем монитор
+            #останавливаем монитор
             stop_evt.set()
             mon_t.join(timeout=2.0)
             if mon_t.is_alive():
                 logging.warning("Monitor thread did not exit gracefully")
             
-            # Принудительно сбрасываем состояние
+            #принудительно сбрасываем состояние
             ws_app.keep_running = False
 
         logging.info(f"Reconnecting in {backoff} seconds...")

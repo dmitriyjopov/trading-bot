@@ -7,7 +7,6 @@ from tqdm import tqdm
 import numpy as np
 from numba import njit, types
 from numba.typed import Dict
-# import keyboard
 '''
 BUCKET_SIZE, WINDOW_LENGTH - ДЛЯ VPIN
 '''
@@ -182,28 +181,25 @@ def _ofi_numba(ts_ns, typ, side, price, size, t0, period_ns, max_bins):
     return ofi
 
 def process_order_flow_imbalance(odf: pd.DataFrame, period: str) -> pd.Series:
-    # 1) Сортировка и подготовка
+    #сортировка и подготовка
     df = odf.sort_values('recv_time')
     df['recv_time'] = pd.to_datetime(df['recv_time'])
     
-    # Базовая метка t0 и период
+    #базовая метка t0 и период
     t0 = df['recv_time'].dt.floor(period).astype('int64').iat[0]
     period_ns = pd.to_timedelta(period).value
-    # Вычисляем количество бинов
+    #вычисляем количество бинов
     t_last = df['recv_time'].astype('int64').iat[-1]
     max_bins = int((t_last - t0) // period_ns) + 1
     
-    # 2) К массивам
     ts_ns   = df['recv_time'].astype('int64').to_numpy()
     typ     = (df['type']=='delta').to_numpy(np.int8)
     side    = (df['side']=='Sell').to_numpy(np.int8)
     price   = df['price'].to_numpy(np.float64)
     size    = df['size'].to_numpy(np.float64)
     
-    # 3) Запуск Numba‑функции
     ofi_vals = _ofi_numba(ts_ns, typ, side, price, size, t0, period_ns, max_bins)
     
-    # 4) Время каждой бины
     bin_times = pd.to_datetime(t0 + np.arange(max_bins, dtype=np.int64)*period_ns)
     return pd.Series(ofi_vals, index=bin_times, name='OFI')
 #KYLE LAMBDA
@@ -225,25 +221,25 @@ def kyle_lambda_vectorized(prices, volumes, sides, timestamps, window_size_ns, f
     if n < 2:
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
     
-    # Вычисляем знаковые объемы и изменения цен
+    #вычисляем знаковые объемы и изменения цен
     signed_volumes = volumes * sides
     price_changes = np.zeros(n, dtype=np.float64)
     price_changes[1:] = prices[1:] - prices[:-1]
     
-    # Определяем границы окон
+    #определяем границы окон
     frst_ts = first_ts#справа та которую передали в функцию
     last_ts = timestamps[-1]
     n_windows = int((last_ts - frst_ts) // window_size_ns) + 1
     window_starts = frst_ts + np.arange(n_windows) * window_size_ns
     
-    # Инициализация результатов
+    #инициализация результатов
     lambda_values = np.full(n_windows, np.nan, dtype=np.float64)
     
     for i in range(n_windows):
         window_start = window_starts[i]
         window_end = window_start + window_size_ns
         
-        # Находим сделки в текущем окне
+        #находим сделки в текущем окне
         mask = (timestamps >= window_start) & (timestamps < window_end)
         if not mask.any():
             continue
@@ -251,7 +247,7 @@ def kyle_lambda_vectorized(prices, volumes, sides, timestamps, window_size_ns, f
         window_price_changes = price_changes[mask]
         window_signed_volumes = signed_volumes[mask]
         
-        # Удаляем NaN значения
+        #удаляем NaN значения
         valid_mask = ~np.isnan(window_price_changes) & ~np.isnan(window_signed_volumes)
         window_price_changes = window_price_changes[valid_mask]
         window_signed_volumes = window_signed_volumes[valid_mask]
@@ -259,7 +255,7 @@ def kyle_lambda_vectorized(prices, volumes, sides, timestamps, window_size_ns, f
         if len(window_price_changes) < 2:
             continue
             
-        # Вычисляем ковариацию и дисперсию
+        #вычисляем ковариацию и дисперсию
         cov_matrix = np.cov(window_price_changes, window_signed_volumes)
         cov = cov_matrix[0, 1]
         var_volume = np.var(window_signed_volumes)
@@ -283,23 +279,20 @@ def vectorized_kyle_lambda(df, period='1h'):
     if df.empty:
         return pd.Series(dtype=float)
     
-    # Преобразуем данные в numpy массивы
+    #в numpy массивы
     timestamps = df['recv_time'].astype(np.int64).to_numpy()  # Преобразуем в наносекунды
     prices = df['price'].to_numpy()
     volumes = df['size'].to_numpy()
     sides = np.where(df['side'] == 'Buy', 1, -1)
     
-    # Вычисляем размер окна в наносекундах
     window_size_ns = pd.to_timedelta(period).value
 
     first_ts = df['recv_time'].dt.floor(period).astype('int64').iat[0]
     
-    # Вычисляем Kyle's Lambda
     window_starts, lambda_values = kyle_lambda_vectorized(
         prices, volumes, sides, timestamps, window_size_ns, first_ts
     )
     
-    # Создаем Series с временным индексом
     index = pd.to_datetime(window_starts)
     return pd.Series(lambda_values, index=index, name='Kyle_Lambda')
 
@@ -321,7 +314,7 @@ def main():
     if PERIOD == "d":
         PERIOD = "1h"
 
-    # Индикатор загрузки данныхˆ
+    #индикатор загрузки данныхˆ
     print("Введите диапазон дат в формате 01-01-2001 или введите [d] для анализа всех данных")
     if (input() == 'd'):
         start_date = "2025-07-12"
@@ -337,7 +330,7 @@ def main():
 
     print("✓ Данные загружены\n")
 
-    # Список задач для отслеживания прогресса
+    #список задач для отслеживания прогресса
     start_time = datetime.now()
     tasks = [
         ("Расчет Cummulative Delta", lambda: cummulutive_delta(df.copy(), PERIOD)),
@@ -352,7 +345,6 @@ def main():
     task_times = {}
     progress_bar = tqdm(tasks, desc="Прогресс расчета", unit="задача", dynamic_ncols=True)
 
-    # Выполняем задачи с отображением прогресса
     for task_name, task_func in progress_bar:
         progress_bar.set_description(f"Выполняется {task_name}")
         try:
@@ -370,7 +362,6 @@ def main():
 
     end_time = datetime.now()
     
-    # Рассчитываем RF после получения Value Area
     if "Расчет Value Area" in results:
         try:
             results["Расчет RF"] = RF(results["Расчет Value Area"])
@@ -379,7 +370,6 @@ def main():
             print(f"⚠ Ошибка при расчете RF: {str(e)}")
             results["Расчет RF"] = pd.Series(dtype=float, name='RF')
 
-    # Извлекаем результаты
     va_df = results["Расчет Value Area"]
     vol_delta = results["Расчет Volume Delta"]
     cum_delta = results["Расчет Cummulative Delta"]
@@ -387,7 +377,7 @@ def main():
     rf = results["Расчет RF"]
     ofi = results["Расчет Order Flow Imbalance"]
     kyle_lambda = results["Расчет Kyle's Lambda"]
-    # Дополнительные преобразования
+
     print("\nФинальные преобразования данных...")
     va_df = va_df.astype({
         'POC_price': float,
@@ -400,7 +390,6 @@ def main():
     cum_delta = cum_delta.rename('cum_delta')
     cum_delta.index.name = 'recv_time'
 
-    # Сборка результатов
     print("Формирование итоговой таблицы...")
     results_df = pd.concat([va_df, vol_delta, cum_delta, vpin, rf, ofi, kyle_lambda], axis=1)
 
@@ -415,10 +404,8 @@ def main():
         .rename('next_close')
     )
 
-    # 2. объединяем с RF
     check = results_df[['POC_price','RF']].join(hourly_close)
 
-    # 3. считаем движение
     check['move_pct'] = (check['next_close'] - check['POC_price']) / check['POC_price'] * 100
 
     print(check)

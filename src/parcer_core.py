@@ -16,7 +16,7 @@ DEPTH         = 50
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# --- Буферизованный Parquet writer ---
+#буферизованный parquet writer
 class BufferedParquetWriter:
     def __init__(self, base_dir, subfolder, header, schema):
         self.base_dir = base_dir
@@ -29,7 +29,7 @@ class BufferedParquetWriter:
         self.lock     = threading.Lock()
         self.stop_evt = threading.Event()
         self.last_flush = time.time()
-        # Схема из header:
+        #схема из header:
         self.schema = schema
         self.thread = threading.Thread(target=self._flush_loop, daemon=True)
         self.thread.start()
@@ -55,12 +55,11 @@ class BufferedParquetWriter:
 
     def _flush(self):
         df = pd.DataFrame(self.buffer, columns=self.header)
-        # ns -> ms
+
         df['recv_time'] = df['recv_time'].astype('datetime64[ms]')
         if 'timestamp' in df.columns:
             df['timestamp'] = df['timestamp'].astype('datetime64[ms]')
 
-        # float64 -> float32, int64 -> int32
         df['price'] = df['price'].astype('float32')
         df['size'] = df['size'].astype('float32')
         if 'seq' in df.columns:
@@ -71,9 +70,9 @@ class BufferedParquetWriter:
         table = pa.Table.from_pandas(df, schema=self.schema)
         today = df['recv_time'].dt.date.iloc[0]
 
-        # Если ещё нет writer-а или дата сменилась — создаём новый
+        #если ещё нет writer-а или дата сменилась — создаём новый
         if self.current_writer is None or self.current_date != today:
-            # Закрываем старый (если был)
+            #закрываем старый (если был)
             if self.current_writer is not None:
                 self.current_writer.close()
 
@@ -114,7 +113,7 @@ class BufferedParquetWriter:
         if self.current_writer is not None:
             self.current_writer.close()
 
-# --- Глобальные объекты и очистка ---
+#глобальные объекты и очистка
 ticks_schema = pa.schema([
     pa.field('recv_time', pa.timestamp('ns'), False),
     pa.field('timestamp', pa.timestamp('ns'), False),
@@ -152,7 +151,6 @@ def init_writers():
 
 ticks_writer, ob_writer = init_writers()
 ws           = None
-# last_msg_time= time.time() #добавить позже
 
 def cleanup():
     logging.info("Exiting websocket...")
@@ -170,7 +168,7 @@ def cleanup():
     except Exception as e:
         logging.error("ob_writer.flush() failed: %s", e)
 
-    # Закрываем writers
+    #закрываем writers
     try:
         ticks_writer.close()
     except Exception as e:
@@ -180,7 +178,7 @@ def cleanup():
     except Exception as e:
         logging.error("ob_writer.close() failed: %s", e)
 
-# --- Обработчик сообщений ---
+#обработчик сообщений
 def handle_msg(msg):
     global last_msg_time
     last_msg_time = time.time()  #добавить позже

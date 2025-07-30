@@ -1,9 +1,7 @@
 pandas
-pybit
-tqdm
 pyarrow
-parquet
-parquet-tools
+tqdm
 numpy
 numba
+websocket-client
 matplotlib
