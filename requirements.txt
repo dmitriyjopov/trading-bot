@@ -1,7 +1,0 @@
-pandas
-pyarrow
-tqdm
-numpy
-numba
-websocket-client
-matplotlib

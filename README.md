@@ -1,2 +1,2 @@
 # tbot
-kostya_bakaikin sosal mne penis
+напишите в терминал с директорией проекта pip install -r requirements.txt
