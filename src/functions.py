@@ -13,36 +13,34 @@ BUCKET_SIZE, WINDOW_LENGTH - ДЛЯ VPIN
 BUCKET_SIZE = 1000
 WINDOW_LENGTH = 10
 
-def read_parquet_range(base_dir, subfolder, start_date=None, end_date=None):
+def read_parquet_by_day(base_dir, subfolder, start_date=None, end_date=None, columns=None, dtypes=None):
     """
-    Читает все parquet-файлы из поддиректории (ticks/orderbook) за указанный диапазон дат.
-    Если даты не указаны — читает все файлы.
+    Построчно читает parquet-файлы по одному дню, сразу приводит к нужным типам и отбирает столбцы.
+    Возвращает список DataFrame, по одному на каждый день.
     """
-    pattern = os.path.join(
-        base_dir, subfolder, "year=*", "month=*", "day=*", "day=*.parquet"
-    )
-    files = glob.glob(pattern)
-    if not files:
-        raise FileNotFoundError(f"No files found in {pattern}")
-    
-    dfs = []
+    pattern = os.path.join(base_dir, subfolder, "year=*", "month=*", "day=*", "day=*.parquet")
+    files = sorted(glob.glob(pattern))
+    out = []
     for file in files:
-        fname = os.path.basename(file)
-        date_str = fname.replace("day=", "").replace(".parquet", "")
-        if start_date or end_date:
-            file_date = pd.to_datetime(date_str)
-            if start_date and file_date < pd.to_datetime(start_date):
-                continue
-            if end_date and file_date > pd.to_datetime(end_date):
-                continue
-        dfs.append(pd.read_parquet(file))
-    if dfs:
-        return pd.concat(dfs, ignore_index=True)
-    else:
-        return pd.DataFrame()
+        # извлечь дату из имени
+        day = os.path.basename(file).split('=')[1].replace('.parquet','')
+        if start_date and day < start_date:   continue
+        if end_date   and day > end_date:     continue
+
+        # читаем ровно этот день
+        df = pd.read_parquet(file, columns=columns)
+
+        # приводим типы, если нужно
+        if dtypes:
+            for col, dtype in dtypes.items():
+                df[col] = df[col].astype(dtype)
+
+        out.append(df)
+        del df   # сразу освобождаем после добавления
+    return out
 
 def cummulutive_delta(df, period):
-    df['signed_size'] = df['size'] * df['side'].map({'Buy':1, 'Sell':-1})#размечаю с учетом знака
+    df['signed_size'] = df['size'] * df['side'].astype(str).map({'Buy':1,'Sell':-1})#размечаю с учетом знака
     
     bar_delta = (
         df.set_index('recv_time')['signed_size'].resample(period).sum().fillna(0)
@@ -125,7 +123,7 @@ def RF(va_df):
 #Volume‑Synchronised Probability of Informed Trading    
 def VPIN(df, period, bucket_size, window_length):
 
-    df['signed_size'] = df['size'] * df['side'].map({'Buy':1, 'Sell':-1})
+    df['signed_size'] = df['size'] * df['side'].astype(str).map({'Buy':1,'Sell':-1})
 
     df['cum_vol']   = df['size'].abs().cumsum()
     df['bucket_id'] = (df['cum_vol'] // bucket_size).astype(int)
@@ -296,10 +294,20 @@ def vectorized_kyle_lambda(df, period='1h'):
     index = pd.to_datetime(window_starts)
     return pd.Series(lambda_values, index=index, name='Kyle_Lambda')
 
-def read_files(start_date, end_date):
-    df = read_parquet_range('./data', 'ticks', start_date, end_date)
-    odf = read_parquet_range('./data', 'orderbook', start_date, end_date)
-    return df, odf
+def read_files_by_day(start_date, end_date):
+    # первые – тики
+    ticks_by_day = read_parquet_by_day(
+        './data', 'ticks', start_date, end_date,
+        columns=['recv_time','symbol','price','size','side'],
+        dtypes={'price':'float32','size':'float32','side':'category'}
+    )
+    # потом стакан
+    ob_by_day = read_parquet_by_day(
+        './data', 'orderbook', start_date, end_date,
+        columns=['recv_time','symbol','type','seq','side','price','size'],
+        dtypes={'price':'float32','size':'float32','side':'category','type':'category'}
+    )
+    return ticks_by_day, ob_by_day
 
 def result_output(va_df, delta, vpin, rf, ofi):
     return pd.concat([va_df, delta, vpin, rf, ofi], axis=1)
