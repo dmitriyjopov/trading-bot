@@ -297,13 +297,13 @@ def vectorized_kyle_lambda(df, period='1h'):
 def read_files_by_day(start_date, end_date):
     # первые – тики
     ticks_by_day = read_parquet_by_day(
-        './data', 'ticks', start_date, end_date,
+        r'G:\data', 'ticks', start_date, end_date,
         columns=['recv_time','symbol','price','size','side'],
         dtypes={'price':'float32','size':'float32','side':'category'}
     )
     # потом стакан
     ob_by_day = read_parquet_by_day(
-        './data', 'orderbook', start_date, end_date,
+        r'G:\data', 'orderbook', start_date, end_date,
         columns=['recv_time','symbol','type','seq','side','price','size'],
         dtypes={'price':'float32','size':'float32','side':'category','type':'category'}
     )
