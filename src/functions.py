@@ -53,7 +53,7 @@ def value_area(df, period, step):
     df["bucket"] = (df["price"] / step).round() * step
     df["volume"] = df["size"]
     
-    grp = df.groupby([pd.Grouper(key='recv_time', freq=period), 'bucket']).agg(
+    grp = df.groupby([pd.Grouper(key='recv_time', freq=period, origin='start_day'), 'bucket']).agg(
         total_volume=('volume', 'sum')
     ).reset_index()
     
@@ -104,11 +104,12 @@ def volume_delta(df, period):
         return pd.Series(dtype=float)
     
     vol_df = df.pivot_table(
-        index=pd.Grouper(key='recv_time', freq=period),
+        index=pd.Grouper(key='recv_time', freq=period, origin='start_day'),
         columns='side',
         values='size',
         aggfunc='sum',
-        fill_value=0
+        # fill_value=0,
+        observed=False
     )
     
     delta = vol_df.get('Buy') - vol_df.get('Sell')
@@ -200,6 +201,7 @@ def process_order_flow_imbalance(odf: pd.DataFrame, period: str) -> pd.Series:
     
     bin_times = pd.to_datetime(t0 + np.arange(max_bins, dtype=np.int64)*period_ns)
     return pd.Series(ofi_vals, index=bin_times, name='OFI')
+
 #KYLE LAMBDA
 def kyle_lambda_vectorized(prices, volumes, sides, timestamps, window_size_ns, first_ts):
     """
@@ -297,13 +299,13 @@ def vectorized_kyle_lambda(df, period='1h'):
 def read_files_by_day(start_date, end_date):
     # первые – тики
     ticks_by_day = read_parquet_by_day(
-        r'G:\data', 'ticks', start_date, end_date,
+        './data', 'ticks', start_date, end_date,
         columns=['recv_time','symbol','price','size','side'],
         dtypes={'price':'float32','size':'float32','side':'category'}
     )
     # потом стакан
     ob_by_day = read_parquet_by_day(
-        r'G:\data', 'orderbook', start_date, end_date,
+        './data', 'orderbook', start_date, end_date,
         columns=['recv_time','symbol','type','seq','side','price','size'],
         dtypes={'price':'float32','size':'float32','side':'category','type':'category'}
     )
