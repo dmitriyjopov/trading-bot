@@ -39,14 +39,21 @@ def read_parquet_by_day(base_dir, subfolder, start_date=None, end_date=None, col
         del df   # сразу освобождаем после добавления
     return out
 
-def cummulutive_delta(df, period):
-    df['signed_size'] = df['size'] * df['side'].astype(str).map({'Buy':1,'Sell':-1})#размечаю с учетом знака
-    
+def cumulative_delta(df, period, start_value=0):
+    """
+    Считает кумулятивную дельту за один день,
+    начиная с переданного стартового значения.
+    """
+    df = df.copy()
+    df['signed_size'] = df['size'] * df['side'].astype(str).map({'Buy': 1, 'Sell': -1})
+
     bar_delta = (
-        df.set_index('recv_time')['signed_size'].resample(period).sum().fillna(0)
+        df.set_index('recv_time')['signed_size']
+        .resample(period).sum().fillna(0)
     )
 
-    return bar_delta.cumsum().rename('cum_delta')
+    return (bar_delta.cumsum() + start_value)
+
 
 #VAH, VAL, POC
 def value_area(df, period, step):
